@@ -60,6 +60,7 @@ task_dim: 96
 num_q: 5
 dropout: 0.01
 simnorm_dim: 8
+simnorm_ratio: 0.5
 
 # logging
 wandb_project: humanoid-bench
