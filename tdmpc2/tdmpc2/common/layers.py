@@ -69,25 +69,56 @@ class PixelPreprocess(nn.Module):
         return x.div_(255.0).sub_(0.5)
 
 
-class SimNorm(nn.Module):
+class HybridSimNorm(nn.Module):
     """
-    Simplicial normalization.
-    Adapted from https://arxiv.org/abs/2204.00616.
+    Hybrid latent normalization:
+    - part of latent simplicial-normalized (SimNorm)
+    - part of latent free (LayerNorm)
     """
 
     def __init__(self, cfg):
         super().__init__()
-        self.dim = cfg.simnorm_dim
+        latent_dim = cfg.latent_dim
+        self.sim_dim = cfg.simnorm_dim
+        self.ratio = cfg.simnorm_ratio
+
+        # how many dimensions to simplex
+        self.simplex_dim = int(latent_dim * self.ratio)
+        self.free_dim = latent_dim - self.simplex_dim
+
+        assert self.simplex_dim % self.sim_dim == 0, \
+            "simplex_dim must be divisible by simnorm_dim"
+
+        if self.free_dim > 0:
+            self.free_norm = nn.LayerNorm(self.free_dim)
+        else:
+            self.free_norm = None
 
     def forward(self, x):
-        shp = x.shape
-        x = x.view(*shp[:-1], -1, self.dim)
-        x = F.softmax(x, dim=-1)
-        return x.view(*shp)
+        """
+        x: [..., latent_dim]
+        """
+        z_simplex = x[..., :self.simplex_dim]
+        z_free    = x[..., self.simplex_dim:]
+
+        # --- SimNorm ---
+        shp = z_simplex.shape
+        z_simplex = z_simplex.view(*shp[:-1], -1, self.sim_dim)
+        z_simplex = F.softmax(z_simplex, dim=-1)
+        z_simplex = z_simplex.view(*shp)
+
+        # --- Free latent ---
+        if self.free_norm is not None:
+            z_free = self.free_norm(z_free)
+
+        return torch.cat([z_simplex, z_free], dim=-1)
 
     def __repr__(self):
-        return f"SimNorm(dim={self.dim})"
-
+        return (
+            f"HybridSimNorm(simplex_ratio={self.ratio}, "
+            f"sim_dim={self.sim_dim}, "
+            f"free_dim={self.free_dim})"
+        )
 
 class NormedLinear(nn.Linear):
     """
@@ -168,7 +199,7 @@ def enc(cfg, out={}):
                 cfg.obs_shape[k][0] + cfg.task_dim,
                 max(cfg.num_enc_layers - 1, 1) * [cfg.enc_dim],
                 cfg.latent_dim,
-                act=SimNorm(cfg),
+                act=HybridSimNorm(cfg)
             )
         elif k == "rgb":
             out[k] = conv(cfg.obs_shape[k], cfg.num_channels, act=SimNorm(cfg))
